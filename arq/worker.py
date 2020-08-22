@@ -22,6 +22,7 @@ from .constants import (
     health_check_key_suffix,
     in_progress_key_prefix,
     job_key_prefix,
+    keep_cronjob_progress,
     result_key_prefix,
     retry_key_prefix,
 )
@@ -406,9 +407,11 @@ class Worker:
             logger.warning('job %s, function %r not found', job_id, function_name)
             return await job_failed(JobExecutionFailed(f'function {function_name!r} not found'))
 
+        keep_inprogress = None
         if hasattr(function, 'next_run'):
             # cron_job
             ref = function_name
+            keep_inprogress = keep_cronjob_progress
         else:
             ref = f'{job_id}:{function_name}'
 
@@ -510,7 +513,9 @@ class Worker:
                 serializer=self.job_serializer,
             )
 
-        await asyncio.shield(self.finish_job(job_id, finish, result_data, result_timeout_s, incr_score))
+        await asyncio.shield(
+            self.finish_job(job_id, finish, result_data, result_timeout_s, incr_score, keep_inprogress=keep_inprogress)
+        )
 
     async def finish_job(
         self,
@@ -519,11 +524,17 @@ class Worker:
         result_data: Optional[bytes],
         result_timeout_s: Optional[float],
         incr_score: Optional[int],
+        keep_inprogress: Optional[float] = None,
     ) -> None:
         with await self.pool as conn:
             await conn.unwatch()
             tr = conn.multi_exec()
-            delete_keys = [in_progress_key_prefix + job_id]
+            delete_keys = []
+            in_progress_key = in_progress_key_prefix + job_id
+            if keep_inprogress is None:
+                delete_keys += [in_progress_key]
+            else:
+                tr.expire(in_progress_key, keep_inprogress)
             if finish:
                 if result_data:
                     tr.setex(result_key_prefix + job_id, result_timeout_s, result_data)
